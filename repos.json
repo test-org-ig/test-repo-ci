@@ -1,0 +1,4 @@
+[
+  { "repo": "test-repo-1", "watch": "glibc" },
+  { "repo": "test-repo-2", "watch": "glibc" }
+]

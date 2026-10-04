@@ -1,0 +1,35 @@
+name: weekly
+
+on:
+  schedule:
+    - cron: "0 0 * * 0"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  repos:
+    runs-on: ubuntu-latest
+    outputs:
+      repos: ${{ steps.repos.outputs.repos }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: repos
+        run: echo "repos=$(jq -c '[.[].repo]' repos.json)" >> "$GITHUB_OUTPUT"
+
+  update:
+    needs: repos
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: ${{ fromJSON(needs.repos.outputs.repos) }}
+    uses: ./.github/workflows/update.yml
+    with:
+      repo: ${{ matrix.repo }}
+      dry-run: ${{ inputs.dry-run == true }}
+    secrets: inherit

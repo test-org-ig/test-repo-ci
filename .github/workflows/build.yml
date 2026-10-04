@@ -1,0 +1,87 @@
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        type: string
+        required: true
+      sha:
+        type: string
+        required: true
+      dry-run:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  cache:
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ inputs.repo }}
+          permission-contents: read
+
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/${{ inputs.repo }}
+          ref: ${{ inputs.sha }}
+          token: ${{ steps.app.outputs.token }}
+          path: project
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@v31
+
+      - uses: cachix/cachix-action@v17
+        with:
+          name: ${{ vars.CACHIX_CACHE_NAME }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: ${{ inputs.dry-run }}
+
+      - name: Build
+        working-directory: project
+        run: nix build .#default --fallback
+
+  push-branch:
+    needs: cache
+    runs-on: ubuntu-latest
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ inputs.repo }}
+          permission-contents: write
+
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/${{ inputs.repo }}
+          ref: ${{ inputs.sha }}
+          token: ${{ steps.app.outputs.token }}
+          path: project
+          fetch-depth: 0
+
+      - name: Point the cachix branch at this commit
+        working-directory: project
+        env:
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          rev=$(git rev-parse HEAD)
+          default=$(git ls-remote --symref origin HEAD | awk '/^ref:/ { sub("refs/heads/", "", $2); print $2 }')
+          git merge-base --is-ancestor "$rev" "origin/$default" || exit 0
+          git merge-base --is-ancestor "$rev" origin/cachix 2>/dev/null && exit 0
+          args=()
+          [ "$DRY_RUN" = true ] && args+=(--dry-run)
+          git push "${args[@]}" origin "$rev":refs/heads/cachix --force

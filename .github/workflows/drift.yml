@@ -1,0 +1,79 @@
+name: drift
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      repos: ${{ steps.check.outputs.repos }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - id: watched
+        run: echo "names=$(jq -r '[.[] | select((.watch // "") != "") | .repo] | join(",")' repos.json)" >> "$GITHUB_OUTPUT"
+
+      - id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.watched.outputs.names }}
+          permission-contents: read
+
+      - uses: cachix/install-nix-action@v31
+
+      - id: check
+        env:
+          TOKEN: ${{ steps.app.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          drifted() {
+            local dir=$1 attr=$2 locked latest
+            locked=$(nix eval --raw --inputs-from "$dir" "nixpkgs#$attr.version") || exit 1
+            latest=$(nix eval --raw "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz#$attr.version") || exit 1
+            echo "$attr: locked=$locked upstream=$latest" >&2
+            [ "$(nix eval --expr "builtins.compareVersions \"$locked\" \"$latest\"")" -lt 0 ]
+          }
+
+          due=()
+          while read -r entry; do
+            repo=$(jq -r .repo <<< "$entry")
+            watch=$(jq -r .watch <<< "$entry")
+            echo "== $repo"
+            git clone -q --depth 1 "https://x-access-token:$TOKEN@github.com/$OWNER/$repo" "checkout-$repo" || exit 1
+            for attr in $watch; do
+              if drifted "$PWD/checkout-$repo" "$attr" || [ "$DRY_RUN" = true ]; then
+                due+=("$repo")
+                break
+              fi
+            done
+          done < <(jq -c '.[] | select((.watch // "") != "")' repos.json)
+
+          echo "repos=$(jq -nc '$ARGS.positional' --args "${due[@]}")" >> "$GITHUB_OUTPUT"
+
+  update:
+    needs: check
+    if: needs.check.outputs.repos != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: ${{ fromJSON(needs.check.outputs.repos) }}
+    uses: ./.github/workflows/update.yml
+    with:
+      repo: ${{ matrix.repo }}
+      inputs: nixpkgs
+      dry-run: ${{ inputs.dry-run == true }}
+    secrets: inherit

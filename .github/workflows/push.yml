@@ -1,0 +1,101 @@
+name: push
+
+run-name: push ${{ inputs.repo }} ${{ inputs.sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        type: string
+        required: true
+      sha:
+        type: string
+        required: true
+      dry-run:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  route:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.route.outputs.build }}
+      updates: ${{ steps.route.outputs.updates }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - id: names
+        run: echo "names=$(jq -r '[.[].repo] | join(",")' repos.json)" >> "$GITHUB_OUTPUT"
+
+      - id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.names.outputs.names }}
+          permission-contents: read
+
+      - id: route
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ inputs.repo }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "invalid commit hash: $SHA" >&2
+            exit 1
+          fi
+          echo "build=$(jq -r --arg r "$REPO" 'any(.[]; .repo == $r)' repos.json)" >> "$GITHUB_OUTPUT"
+
+          updates='[]'
+          while read -r target; do
+            [ "$target" = "$REPO" ] && continue
+            lock=$(gh api -H "Accept: application/vnd.github.raw+json" "repos/$OWNER/$target/contents/flake.lock") || {
+              echo "::warning::could not read flake.lock of $target"
+              continue
+            }
+            names=$(jq -r --arg o "$OWNER" --arg r "$REPO" '
+              .nodes as $n
+              | .nodes.root.inputs
+              | to_entries[]
+              | select(.value | type == "string")
+              | select(($n[.value].locked // {}) as $l
+                  | $l.type == "github"
+                  and ($l.owner | ascii_downcase) == ($o | ascii_downcase)
+                  and ($l.repo | ascii_downcase) == ($r | ascii_downcase))
+              | .key' <<< "$lock" | paste -sd' ' -)
+            [ -n "$names" ] && updates=$(jq -c --arg t "$target" --arg i "$names" '. + [{repo: $t, inputs: $i}]' <<< "$updates")
+          done < <(jq -r '.[].repo' repos.json)
+          echo "updates=$updates" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: route
+    if: needs.route.outputs.build == 'true'
+    concurrency:
+      group: build-${{ inputs.repo }}
+      cancel-in-progress: false
+    uses: ./.github/workflows/build.yml
+    with:
+      repo: ${{ inputs.repo }}
+      sha: ${{ inputs.sha }}
+      dry-run: ${{ inputs.dry-run }}
+    secrets: inherit
+
+  update:
+    needs: route
+    if: needs.route.outputs.updates != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.route.outputs.updates) }}
+    uses: ./.github/workflows/update.yml
+    with:
+      repo: ${{ matrix.repo }}
+      inputs: ${{ matrix.inputs }}
+      dry-run: ${{ inputs.dry-run }}
+    secrets: inherit

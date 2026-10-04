@@ -1,0 +1,88 @@
+name: update
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        type: string
+        required: true
+      inputs:
+        type: string
+        default: ""
+      dry-run:
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      repo:
+        type: string
+        required: true
+      inputs:
+        type: string
+        default: ""
+      dry-run:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: update-${{ inputs.repo }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check the inputs
+        env:
+          REPO: ${{ inputs.repo }}
+          INPUTS: ${{ inputs.inputs }}
+        run: |
+          if ! jq -e --arg r "$REPO" 'any(.[]; .repo == $r)' repos.json > /dev/null; then
+            echo "$REPO is not listed in repos.json" >&2
+            exit 1
+          fi
+          if [[ ! "$INPUTS" =~ ^[A-Za-z0-9_.\ -]*$ || "$INPUTS" =~ (^|\ )- ]]; then
+            echo "invalid input names: $INPUTS" >&2
+            exit 1
+          fi
+
+      - id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ inputs.repo }}
+          permission-contents: write
+
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/${{ inputs.repo }}
+          token: ${{ steps.app.outputs.token }}
+          path: project
+
+      - uses: cachix/install-nix-action@v31
+
+      - name: Update flake.lock
+        working-directory: project
+        env:
+          INPUTS: ${{ inputs.inputs }}
+        run: nix flake update $INPUTS
+
+      - name: Show what would have been committed
+        if: inputs.dry-run
+        working-directory: project
+        run: |
+          git diff --stat -- flake.lock
+          echo "dry run: nothing committed"
+
+      - if: ${{ !inputs.dry-run }}
+        uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          repository: project
+          commit_message: "chore(flake): update flake.lock"
