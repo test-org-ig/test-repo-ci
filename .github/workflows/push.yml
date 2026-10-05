@@ -87,8 +87,8 @@ jobs:
     secrets: inherit
 
   update:
-    needs: route
-    if: needs.route.outputs.updates != '[]'
+    needs: [route, build]
+    if: ${{ !cancelled() && needs.route.result == 'success' && needs.route.outputs.updates != '[]' && contains(fromJSON('["success","skipped"]'), needs.build.result) }}
     strategy:
       fail-fast: false
       matrix:
