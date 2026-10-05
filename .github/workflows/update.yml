@@ -9,6 +9,9 @@ on:
       inputs:
         type: string
         default: ""
+      expect-rev:
+        type: string
+        default: ""
       dry-run:
         type: boolean
         default: false
@@ -18,6 +21,9 @@ on:
         type: string
         required: true
       inputs:
+        type: string
+        default: ""
+      expect-rev:
         type: string
         default: ""
       dry-run:
@@ -68,20 +74,33 @@ jobs:
 
       - uses: cachix/install-nix-action@v31
 
-      - name: Update flake.lock
+      - id: update
+        name: Update flake.lock
         working-directory: project
         env:
           INPUTS: ${{ inputs.inputs }}
-        run: nix flake update $INPUTS
+          EXPECT_REV: ${{ inputs.expect-rev }}
+        run: |
+          nix flake update $INPUTS
+          [ -n "$EXPECT_REV" ] || exit 0
+          for name in $INPUTS; do
+            rev=$(jq -r --arg n "$name" '(.nodes.root.inputs[$n] | select(type == "string")) as $k | .nodes[$k].locked.rev // ""' flake.lock)
+            if [ "$rev" != "$EXPECT_REV" ]; then
+              echo "$name resolved to ${rev:-nothing}, not $EXPECT_REV: a newer commit has its own run, discarding"
+              git checkout -- flake.lock
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
 
       - name: Show what would have been committed
-        if: inputs.dry-run
+        if: ${{ inputs.dry-run && steps.update.outputs.skip != 'true' }}
         working-directory: project
         run: |
           git diff --stat -- flake.lock
           echo "dry run: nothing committed"
 
-      - if: ${{ !inputs.dry-run }}
+      - if: ${{ !inputs.dry-run && steps.update.outputs.skip != 'true' }}
         uses: stefanzweifel/git-auto-commit-action@v7
         with:
           repository: project

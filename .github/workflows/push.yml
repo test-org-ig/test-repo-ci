@@ -97,5 +97,6 @@ jobs:
     with:
       repo: ${{ matrix.repo }}
       inputs: ${{ matrix.inputs }}
+      expect-rev: ${{ inputs.sha }}
       dry-run: ${{ inputs.dry-run }}
     secrets: inherit
